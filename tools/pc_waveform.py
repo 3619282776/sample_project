@@ -147,6 +147,10 @@ def selftest():
 FFT_N = 512          # 时频图每帧 FFT 长度（16kHz 下约 32ms，频率分辨率约 31Hz）
 HOP = FFT_N // 2     # 帧移（hop size）
 
+# 人声主要频段：下限覆盖基频（男 85~180Hz / 女 165~255Hz），上限覆盖语音谐波与 300~3400Hz 语音带宽
+VOICE_FMIN = 60.0
+VOICE_FMAX = 4000.0
+
 
 def run_gui(port, baud, fs, window_sec, spec_sec=5.0):
     try:
@@ -173,16 +177,17 @@ def run_gui(port, baud, fs, window_sec, spec_sec=5.0):
     plot.setYRange(-1.05, 1.05)
     plot.showGrid(x=True, y=True, alpha=0.3)
 
-    spec_plot = win.addPlot(title="FFT magnitude spectrum (ch0)", row=1, col=0)
+    spec_plot = win.addPlot(title="FFT — 人声频段 voice band (ch0)", row=1, col=0)
     spec_plot.setLabel("bottom", "frequency", units="Hz")
-    spec_plot.setLabel("left", "magnitude (dB)")
-    spec_plot.setYRange(-100, 5)
+    spec_plot.setLabel("left", "magnitude (dBFS)")
+    spec_plot.setXRange(VOICE_FMIN, VOICE_FMAX)
+    spec_plot.setYRange(-90, 5)
     spec_plot.showGrid(x=True, y=True, alpha=0.3)
 
-    specgram_plot = win.addPlot(title="Spectrogram / STFT (ch0)", row=2, col=0)
+    specgram_plot = win.addPlot(title="Spectrogram / STFT — 人声频段 voice band (ch0)", row=2, col=0)
     specgram_plot.setLabel("bottom", "time (s ago)", units="s")
     specgram_plot.setLabel("left", "frequency", units="Hz")
-    specgram_plot.setYRange(0, fs / 2.0)
+    specgram_plot.setYRange(VOICE_FMIN, VOICE_FMAX)
 
     info = win.addLabel("waiting for data...", row=3, col=0)
 
@@ -200,7 +205,7 @@ def run_gui(port, baud, fs, window_sec, spec_sec=5.0):
     specgram_plot.addItem(spec_img)
     cmap = pg.colormap.get("inferno")
     try:
-        colorbar = pg.ColorBarItem(values=(-80.0, 0.0), colorMap=cmap, label="relative dB")
+        colorbar = pg.ColorBarItem(values=(-90.0, 0.0), colorMap=cmap, label="dBFS")
         win.addItem(colorbar, row=2, col=1)
         colorbar.setImageItem(spec_img)
     except Exception:
@@ -238,14 +243,14 @@ def run_gui(port, baud, fs, window_sec, spec_sec=5.0):
                 if ch == 0:
                     arr0 = arr
 
-            # FFT 幅度谱（对当前窗口做加窗 + rfft，显示相对 dB）
+            # FFT 幅度谱（加窗 + rfft，换算为 dBFS：满幅正弦≈0dB，说话时人声频段会明显凸起）
             if arr0 is not None and arr0.size >= 4:
                 x = arr0 - np.float32(np.mean(arr0))
                 w = np.hanning(x.size)
                 sp = np.abs(np.fft.rfft(x * w))
-                sp = sp / (np.max(sp) + 1e-12)
+                ref = x.size / 4.0  # 满幅正弦经 Hann 窗的 rfft 峰值（相干增益 0.5，半谱再除 2）
                 freqs = np.fft.rfftfreq(x.size, 1.0 / fs)
-                spec_curve.setData(freqs, 20.0 * np.log10(sp + 1e-12))
+                spec_curve.setData(freqs, 20.0 * np.log10(sp / ref + 1e-12))
 
             # 时频图（STFT）：对 ch0 历史做滑窗 FFT
             hist = list(hist_buf)
@@ -257,9 +262,8 @@ def run_gui(port, baud, fs, window_sec, spec_sec=5.0):
                 frames = h[idx]
                 w2 = np.hanning(FFT_N)
                 s = np.abs(np.fft.rfft(frames * w2, axis=1)).T  # (freq, time)
-                s = s / (np.max(s) + 1e-12)
-                s_db = 20.0 * np.log10(s + 1e-12)
-                spec_img.setImage(s_db, autoLevels=False, levels=(-80.0, 0.0))
+                s_db = 20.0 * np.log10(s / (FFT_N / 4.0) + 1e-12)
+                spec_img.setImage(s_db, autoLevels=False, levels=(-90.0, 0.0))
                 # 时间轴：以“现在”为 0，负值表示过去；帧中心相对时间
                 x0 = ((FFT_N - 1) / 2.0 - (h.size - 1)) / fs
                 width = (nframes - 1) * HOP / fs if nframes > 1 else FFT_N / fs
