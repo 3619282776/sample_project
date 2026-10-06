@@ -263,7 +263,9 @@ def run_gui(port, baud, fs, window_sec, spec_sec=5.0):
                 w2 = np.hanning(FFT_N)
                 s = np.abs(np.fft.rfft(frames * w2, axis=1)).T  # (freq, time)
                 s_db = 20.0 * np.log10(s / (FFT_N / 4.0) + 1e-12)
-                spec_img.setImage(s_db, autoLevels=False, levels=(-90.0, 0.0))
+                # s_db 形状为 (freq, time)；转置成 (time, freq) 后交给 ImageItem，
+                # 使其按 col-major 默认把时间映射到 X 轴（左右滚动）、频率映射到 Y 轴
+                spec_img.setImage(np.ascontiguousarray(s_db.T), autoLevels=False, levels=(-90.0, 0.0))
                 # 时间轴：以“现在”为 0，负值表示过去；帧中心相对时间
                 x0 = ((FFT_N - 1) / 2.0 - (h.size - 1)) / fs
                 width = (nframes - 1) * HOP / fs if nframes > 1 else FFT_N / fs
