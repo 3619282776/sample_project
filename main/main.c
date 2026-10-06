@@ -81,66 +81,134 @@ static void doa_task(void *arg)
         if (xSemaphoreTake(s_doa_sem, portMAX_DELAY) == pdTRUE) {
             int b = s_doa_ready;
             if (b >= 0) {
-                s_angle_deg = doa_estimate_angle(s_doa_l[b], s_doa_r[b], DOA_WINDOW);
+                float ang = doa_estimate_angle(s_doa_l[b], s_doa_r[b], DOA_WINDOW);
+                if (!isnan(ang)) {          // 有效方向才更新，静音时保持上次角度
+                    s_angle_deg = ang;
+                }
             }
         }
     }
 }
 
-/* ---- LCD 显示：水平条（左-中-右）---- */
+/* ---- LCD 显示：360° 罗盘 + 圆点（指示声源方向）---- */
 
 #define COLOR_BG     0x0000
-#define COLOR_BAR    0x2104
+#define COLOR_RING   0xFFFF
+#define COLOR_TICK   0x7BEF
 #define COLOR_WHITE  0xFFFF
 #define COLOR_GREEN  0x07E0
+#define COLOR_DOT    0xFFE0
 
-#define BAR_X0   40
-#define BAR_X1   (ILI9341_WIDTH - 40)
-#define BAR_Y    90
-#define BAR_H    20
-#define BAR_CX   ((BAR_X0 + BAR_X1) / 2)
-#define BAR_HALF ((BAR_X1 - BAR_X0) / 2)
+#define PI_F 3.14159265358979323846f
 
-static bool s_bg_drawn = false;
+#define CX       120                 // 罗盘圆心（竖屏 240x320）
+#define CY       150
+#define R_RING   78                  // 罗盘圆环半径
+#define R_DOT    (R_RING - 7)        // 圆点轨道半径
+#define DOT_R    4                   // 圆点半径
 
-static void draw_doa_display(int angle_deg)
+#define NUM_Y    (CY + R_RING + 24)  // 底部角度数字起始 y
+
+/* 逐扫描线填充实心圆 */
+static void draw_filled_circle(int cx, int cy, int r, uint16_t color)
 {
-    if (!s_bg_drawn) {
-        ili9341_fill_screen(COLOR_BG);
-        ili9341_draw_text3x5(BAR_X0 - 12, BAR_Y + BAR_H + 24, 3, COLOR_WHITE, "L");
-        ili9341_draw_text3x5(BAR_CX - 5,  BAR_Y + BAR_H + 24, 3, COLOR_WHITE, "C");
-        ili9341_draw_text3x5(BAR_X1 + 4,  BAR_Y + BAR_H + 24, 3, COLOR_WHITE, "R");
-        s_bg_drawn = true;
+    if (r < 0) {
+        return;
+    }
+    int r2 = r * r;
+    for (int dy = -r; dy <= r; dy++) {
+        int dx = (int)(sqrtf((float)(r2 - dy * dy)) + 0.5f);
+        ili9341_fill_rect(cx - dx, cy + dy, 2 * dx + 1, 1, color);
+    }
+}
+
+/* Bresenham 直线（线宽约 2px） */
+static void draw_line(int x0, int y0, int x1, int y1, uint16_t color)
+{
+    int ax = (x1 >= x0) ? (x1 - x0) : (x0 - x1);
+    int ay = (y1 >= y0) ? (y1 - y0) : (y0 - y1);
+    int dx = ax, dy = -ay;
+    int sx = x0 < x1 ? 1 : -1;
+    int sy = y0 < y1 ? 1 : -1;
+    int err = dx + dy;
+    for (;;) {
+        ili9341_fill_rect(x0 - 1, y0 - 1, 2, 2, color);
+        if (x0 == x1 && y0 == y1) {
+            break;
+        }
+        int e2 = 2 * err;
+        if (e2 >= dy) { err += dy; x0 += sx; }
+        if (e2 <= dx) { err += dx; y0 += sy; }
+    }
+}
+
+static void draw_compass_background(void)
+{
+    ili9341_fill_screen(COLOR_BG);
+
+    /* 圆环（线宽约 3px） */
+    draw_filled_circle(CX, CY, R_RING + 1, COLOR_RING);
+    draw_filled_circle(CX, CY, R_RING - 1, COLOR_BG);
+
+    /* 12 根刻度，每 30° 一根；四个主方向更长更亮 */
+    for (int i = 0; i < 12; i++) {
+        float a = (float)i * (PI_F / 6.0f);
+        float s = sinf(a), c = cosf(a);
+        int corner = (i % 3 == 0);
+        int r1 = corner ? (R_RING + 2) : (R_RING + 3);
+        int r2 = corner ? (R_RING + 14) : (R_RING + 10);
+        uint16_t col = corner ? COLOR_WHITE : COLOR_TICK;
+        draw_line(CX + (int)lrintf(s * (float)r1), CY - (int)lrintf(c * (float)r1),
+                  CX + (int)lrintf(s * (float)r2), CY - (int)lrintf(c * (float)r2), col);
     }
 
-    // 重绘条带（清除旧标记）
-    ili9341_fill_rect(BAR_X0, BAR_Y - 8, BAR_X1 - BAR_X0, BAR_H + 16, COLOR_BG);
-    ili9341_fill_rect(BAR_X0, BAR_Y, BAR_X1 - BAR_X0, BAR_H, COLOR_BAR);
-    ili9341_fill_rect(BAR_CX - 2, BAR_Y - 6, 4, BAR_H + 12, COLOR_GREEN);          // 中央刻度
-    ili9341_fill_rect(BAR_X0, BAR_Y - 4, 2, BAR_H + 8, COLOR_WHITE);              // 左端刻度
-    ili9341_fill_rect(BAR_X1 - 2, BAR_Y - 4, 2, BAR_H + 8, COLOR_WHITE);          // 右端刻度
+    /* 正前方参考指针（圆心向上，不进入圆点轨道） */
+    ili9341_fill_rect(CX - 1, CY - (R_DOT - 8), 3, R_DOT - 8, COLOR_GREEN);
 
-    // 标记
-    int mx = BAR_CX + (int)((float)angle_deg * (float)BAR_HALF / 90.0f);
-    if (mx < BAR_X0) mx = BAR_X0;
-    if (mx > BAR_X1) mx = BAR_X1;
-    ili9341_fill_rect(mx - 4, BAR_Y - 8, 8, BAR_H + 16, COLOR_GREEN);
+    /* 中心点 */
+    draw_filled_circle(CX, CY, 2, COLOR_WHITE);
+}
 
-    // 角度数字
-    ili9341_fill_rect(BAR_CX - 70, BAR_Y + 60, 140, 40, COLOR_BG);
-    ili9341_draw_number(BAR_CX - 45, BAR_Y + 62, 12, 5, COLOR_WHITE, angle_deg);
+static int s_num_last = 9999;
+static void draw_angle_number(int ai)
+{
+    if (ai == s_num_last) {
+        return;
+    }
+    s_num_last = ai;
+    ili9341_fill_rect(CX - 60, NUM_Y - 4, 120, 40, COLOR_BG);
+    ili9341_draw_number(CX - 39, NUM_Y, 14, 4, COLOR_WHITE, ai);
 }
 
 static void lcd_task(void *arg)
 {
-    int last_angle = 9999;
+    float smoothed = 0.0f;
+    int last_x = -10000;
+    int last_y = -10000;
+    bool dot_drawn = false;
+
+    draw_compass_background();
+
     while (1) {
-        int angle = (int)s_angle_deg;
-        if (angle != last_angle) {
-            last_angle = angle;
-            draw_doa_display(angle);
+        /* 指数平滑，让圆点在两次 DOA 更新之间连续滑动 */
+        float target = s_angle_deg;
+        smoothed += 0.25f * (target - smoothed);
+
+        float rad = smoothed * (PI_F / 180.0f);
+        int x = CX + (int)lrintf(sinf(rad) * (float)R_DOT);
+        int y = CY - (int)lrintf(cosf(rad) * (float)R_DOT);
+
+        if (dot_drawn && (x != last_x || y != last_y)) {
+            draw_filled_circle(last_x, last_y, DOT_R + 1, COLOR_BG);
         }
-        vTaskDelay(pdMS_TO_TICKS(50));
+        draw_filled_circle(x, y, DOT_R, COLOR_DOT);
+        last_x = x;
+        last_y = y;
+        dot_drawn = true;
+
+        draw_angle_number((int)lrintf(smoothed));
+
+        vTaskDelay(pdMS_TO_TICKS(16));  /* ~60 fps */
     }
 }
 
@@ -149,7 +217,7 @@ void app_main(void)
     ESP_LOGI(TAG, "starting...");
 
     ili9341_init();
-    ili9341_fill_screen(0xFFFF);   // 全白测试：白屏
+    ili9341_fill_screen(COLOR_BG);   // 初始清屏为背景色，随后由 lcd_task 绘制声源方向
     ESP_ERROR_CHECK(mic_i2s_init());
     ESP_ERROR_CHECK(amp_i2s_init());
 
@@ -159,7 +227,7 @@ void app_main(void)
     xTaskCreate(audio_task, "audio", 4096, NULL, 6, NULL);
     xTaskCreate(playback_task, "playback", 4096, NULL, 5, NULL);
     xTaskCreate(doa_task, "doa", 4096, NULL, 4, NULL);
-    // xTaskCreate(lcd_task, "lcd", 4096, NULL, 3, NULL);   // 全白测试：关闭方位显示
+    xTaskCreate(lcd_task, "lcd", 4096, NULL, 3, NULL);
 
     ESP_LOGI(TAG, "tasks started");
 }

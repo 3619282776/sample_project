@@ -33,5 +33,9 @@
     "--query-driver=**",
     "--compile-commands-dir=d:\\Store\\Project\\sample_project\\build"
   ],
-  "idf.flashType": "UART"
+  "idf.flashType": "UART",
+  "idf.espIdfPathWin": "e:\\cvvv\\ESPIDF\\v5.3.4\\esp-idf",
+  "idf.toolsPathWin": "E:\\cvvv\\ESPIDF\\ESPTOOL",
+  "idf.pythonInstallPath": "e:\\cvvv\\ESPIDF\\ESPTOOL\\tools\\idf-python\\3.11.2\\python.exe",
+  "idf.portWin": "COM15"
 }

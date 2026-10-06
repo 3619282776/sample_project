@@ -58,6 +58,18 @@ int mic_i2s_read(int32_t *interleaved, int max_frames, uint32_t timeout_ms)
 
 float doa_estimate_angle(const int32_t *l, const int32_t *r, int n)
 {
+    // 静音检测：平均幅值低于门限时认为没有有效声源，返回 NAN（无效方向）。
+    // 这样安静环境下不会因底噪把方向算得乱跳。门限见 audio_config.h 的 DOA_MIN_AMPLITUDE。
+    int64_t amp_sum = 0;
+    for (int i = 0; i < n; i++) {
+        amp_sum += (l[i] >= 0) ? (int64_t)l[i] : -(int64_t)l[i];
+        amp_sum += (r[i] >= 0) ? (int64_t)r[i] : -(int64_t)r[i];
+    }
+    float mean_amp = (float)amp_sum / (float)(n * 2);
+    if (mean_amp < DOA_MIN_AMPLITUDE) {
+        return NAN;
+    }
+
     // 小滞后范围内的时域互相关（GCC 的简化形式，无需 FFT）
     const int L = DOA_MAX_LAG;
     int64_t corr[2 * L + 1];
