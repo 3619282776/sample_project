@@ -55,7 +55,6 @@ esp_err_t amp_i2s_init(void)
 }
 
 
-
 esp_err_t amp_write(const int16_t *mono, int samples, uint32_t timeout_ms)
 {
     if (samples <= 0) {
