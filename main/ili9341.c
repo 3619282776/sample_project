@@ -57,6 +57,12 @@ void ili9341_init(void)
 
     ESP_ERROR_CHECK(esp_lcd_panel_reset(s_panel));
     ESP_ERROR_CHECK(esp_lcd_panel_init(s_panel));
+
+    // 横屏：交换 X/Y 轴（240x320 -> 320x240）。若屏幕内容上下/左右颠倒，调整下面
+    // mirror 的两个布尔值即可（四个组合对应四种旋转方向）。
+    ESP_ERROR_CHECK(esp_lcd_panel_swap_xy(s_panel, true));
+    ESP_ERROR_CHECK(esp_lcd_panel_mirror(s_panel, true, false));
+
     ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(s_panel, true));
 
     ESP_LOGI(TAG, "LCD ready (esp_lcd + ST7789)");
@@ -79,6 +85,14 @@ void ili9341_fill_rect(int x, int y, int w, int h, uint16_t color)
 void ili9341_fill_screen(uint16_t color)
 {
     ili9341_fill_rect(0, 0, ILI9341_WIDTH, ILI9341_HEIGHT, color);
+}
+
+void ili9341_draw_bitmap(int x, int y, int w, int h, const uint16_t *pixels)
+{
+    if (pixels == NULL || w <= 0 || h <= 0) {
+        return;
+    }
+    esp_lcd_panel_draw_bitmap(s_panel, x, y, x + w, y + h, pixels);
 }
 
 /* ---------------- 7 段数码管数字 ---------------- */
