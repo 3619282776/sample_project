@@ -12,6 +12,7 @@
 #include "inmp441_doa.h"
 #include "max98357.h"
 #include "ili9341.h"
+#include "uart_stream.h"
 
 static const char *TAG = "main";
 
@@ -59,6 +60,9 @@ static void audio_task(void *arg)
 
         // 送入回放流缓冲（触发阈值与块大小一致，保证整块原子收发）
         xStreamBufferSend(s_playback_sb, mono, (size_t)frames * sizeof(int16_t), portMAX_DELAY);
+
+        // 波形透传电脑：~32 KB/s 远低于 921600 波特率上限，uart_write_bytes 只做内存拷贝，不会阻塞实时音频
+        uart_stream_send(mono, 1, frames);
     }
 }
 
@@ -214,6 +218,7 @@ static void lcd_task(void *arg)
 
 void app_main(void)
 {
+    ESP_ERROR_CHECK(uart_stream_init());   // 先装 UART 驱动并重定向日志，启动日志也走 921600
     ESP_LOGI(TAG, "starting...");
 
     ili9341_init();
