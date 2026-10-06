@@ -144,7 +144,11 @@ def selftest():
     print("OK — 协议与解析器一致。")
 
 
-def run_gui(port, baud, fs, window_sec):
+FFT_N = 512          # 时频图每帧 FFT 长度（16kHz 下约 32ms，频率分辨率约 31Hz）
+HOP = FFT_N // 2     # 帧移（hop size）
+
+
+def run_gui(port, baud, fs, window_sec, spec_sec=5.0):
     try:
         import serial
     except ImportError:
@@ -160,24 +164,47 @@ def run_gui(port, baud, fs, window_sec):
 
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
     win = pg.GraphicsLayoutWidget()
-    win.setWindowTitle(f"{port} @ {baud} — 16kHz 麦克风波形")
-    win.resize(1000, 480)
+    win.setWindowTitle(f"{port} @ {baud} — 波形 / FFT 频谱 / 时频图")
+    win.resize(1000, 980)
 
-    plot = win.addPlot(title="INMP441 mono waveform")
+    plot = win.addPlot(title="INMP441 mono waveform (ch0)")
     plot.setLabel("bottom", "time", units="s")
     plot.setLabel("left", "amplitude")
     plot.setYRange(-1.05, 1.05)
     plot.showGrid(x=True, y=True, alpha=0.3)
 
-    info = win.addLabel("waiting for data...", row=1, col=0)
+    spec_plot = win.addPlot(title="FFT magnitude spectrum (ch0)", row=1, col=0)
+    spec_plot.setLabel("bottom", "frequency", units="Hz")
+    spec_plot.setLabel("left", "magnitude (dB)")
+    spec_plot.setYRange(-100, 5)
+    spec_plot.showGrid(x=True, y=True, alpha=0.3)
+
+    specgram_plot = win.addPlot(title="Spectrogram / STFT (ch0)", row=2, col=0)
+    specgram_plot.setLabel("bottom", "time (s ago)", units="s")
+    specgram_plot.setLabel("left", "frequency", units="Hz")
+    specgram_plot.setYRange(0, fs / 2.0)
+
+    info = win.addLabel("waiting for data...", row=3, col=0)
 
     parser = FrameParser()
     ch_bufs = {}          # ch -> deque
+    hist_buf = collections.deque(maxlen=max(FFT_N + HOP, int(fs * spec_sec)))  # ch0 历史，供时频图
     lock = threading.Lock()
     running = True
 
     curves = {}
     colors = ["#ffd34d", "#4dff9e", "#4dc3ff", "#ff4d9e"]
+
+    spec_curve = spec_plot.plot(pen=pg.mkPen("#ff4d9e", width=1))
+    spec_img = pg.ImageItem()
+    specgram_plot.addItem(spec_img)
+    cmap = pg.colormap.get("inferno")
+    try:
+        colorbar = pg.ColorBarItem(values=(-80.0, 0.0), colorMap=cmap, label="relative dB")
+        win.addItem(colorbar, row=2, col=1)
+        colorbar.setImageItem(spec_img)
+    except Exception:
+        pass  # 旧版 pyqtgraph 没有 ColorBarItem，仅显示热力图
 
     def ensure_curve(ch):
         if ch not in curves:
@@ -196,18 +223,52 @@ def run_gui(port, baud, fs, window_sec):
                     with lock:
                         buf = ch_bufs.setdefault(c, collections.deque(maxlen=window))
                         buf.extend(seg.tolist())
+                        if c == 0:
+                            hist_buf.extend(seg.tolist())
 
     def update():
         with lock:
+            arr0 = None
             for ch, buf in ch_bufs.items():
                 if not buf:
                     continue
                 arr = np.array(list(buf), dtype=np.float32)
                 t = (np.arange(arr.size, dtype=np.float64) - (arr.size - 1)) / fs
                 ensure_curve(ch).setData(t, arr)
+                if ch == 0:
+                    arr0 = arr
+
+            # FFT 幅度谱（对当前窗口做加窗 + rfft，显示相对 dB）
+            if arr0 is not None and arr0.size >= 4:
+                x = arr0 - np.float32(np.mean(arr0))
+                w = np.hanning(x.size)
+                sp = np.abs(np.fft.rfft(x * w))
+                sp = sp / (np.max(sp) + 1e-12)
+                freqs = np.fft.rfftfreq(x.size, 1.0 / fs)
+                spec_curve.setData(freqs, 20.0 * np.log10(sp + 1e-12))
+
+            # 时频图（STFT）：对 ch0 历史做滑窗 FFT
+            hist = list(hist_buf)
+            if len(hist) >= FFT_N:
+                h = np.asarray(hist, dtype=np.float32)
+                h = h - np.float32(np.mean(h))
+                nframes = (h.size - FFT_N) // HOP + 1
+                idx = np.arange(nframes)[:, None] * HOP + np.arange(FFT_N)[None, :]
+                frames = h[idx]
+                w2 = np.hanning(FFT_N)
+                s = np.abs(np.fft.rfft(frames * w2, axis=1)).T  # (freq, time)
+                s = s / (np.max(s) + 1e-12)
+                s_db = 20.0 * np.log10(s + 1e-12)
+                spec_img.setImage(s_db, autoLevels=False, levels=(-80.0, 0.0))
+                # 时间轴：以“现在”为 0，负值表示过去；帧中心相对时间
+                x0 = ((FFT_N - 1) / 2.0 - (h.size - 1)) / fs
+                width = (nframes - 1) * HOP / fs if nframes > 1 else FFT_N / fs
+                spec_img.setRect(x0, 0.0, width, fs / 2.0)
+
         info.setText(
             f"frames={parser.frames}  dropped={parser.dropped}  "
-            f"buffered={sum(len(b) for b in ch_bufs.values())}  window={window/fs:.2f}s"
+            f"buffered={sum(len(b) for b in ch_bufs.values())}  wave={window/fs:.2f}s  "
+            f"specgram={len(hist_buf)/fs:.2f}s"
         )
 
     thr = threading.Thread(target=reader_loop, daemon=True)
@@ -230,7 +291,8 @@ def main():
     ap.add_argument("port", nargs="?", default=None, help="串口，如 COM5 或 /dev/ttyUSB0（缺省自动枚举）")
     ap.add_argument("baud", nargs="?", type=int, default=921600, help="波特率，默认 921600")
     ap.add_argument("fs", nargs="?", type=int, default=16000, help="采样率 Hz，默认 16000")
-    ap.add_argument("--window", type=float, default=0.5, help="显示时间窗（秒），默认 0.5")
+    ap.add_argument("--window", type=float, default=0.5, help="波形显示时间窗（秒），默认 0.5")
+    ap.add_argument("--spec-window", type=float, default=5.0, help="时频图历史时长（秒），默认 5.0")
     ap.add_argument("--selftest", action="store_true", help="编解码自测（无需硬件）")
     args = ap.parse_args()
 
@@ -241,8 +303,8 @@ def main():
     port = args.port or pick_port()
     if not port:
         _fail("未找到可用串口")
-    print(f"打开 {port} @ {args.baud}, fs={args.fs} Hz；波形窗口弹出后即可查看，关闭窗口即退出")
-    run_gui(port, args.baud, args.fs, args.window)
+    print(f"打开 {port} @ {args.baud}, fs={args.fs} Hz；波形/频谱/时频图窗口弹出后即可查看，关闭窗口即退出")
+    run_gui(port, args.baud, args.fs, args.window, args.spec_window)
 
 
 if __name__ == "__main__":
