@@ -19,6 +19,7 @@ pc_waveform.py — 实时显示 ESP32 INMP441 麦克风波形（USB 串口透传
 import argparse
 import collections
 import datetime
+import itertools
 import sys
 import threading
 import time
@@ -207,17 +208,24 @@ def run_gui(port, baud, fs, window_sec, spec_sec=5.0):
     spec_plot.showGrid(x=True, y=True, alpha=0.3)
 
     specgram_plot = win.addPlot(title="Spectrogram / STFT — 人声频段 voice band (ch0)", row=2, col=0)
-    specgram_plot.setLabel("bottom", "time (s ago)", units="s")
-    specgram_plot.setLabel("left", "frequency", units="Hz")
-    specgram_plot.setYRange(VOICE_FMIN, VOICE_FMAX)
+    specgram_plot.setLabel("bottom", "frequency", units="Hz")
+    specgram_plot.setLabel("left", "time", units="s")
+    specgram_plot.setXRange(VOICE_FMIN, VOICE_FMAX)
 
     info = win.addLabel("waiting for data...", row=3, col=0)
 
     parser = FrameParser()
     ch_bufs = {}          # ch -> deque
-    hist_buf = collections.deque(maxlen=max(FFT_N + HOP, int(fs * spec_sec)))  # ch0 历史，供时频图
     lock = threading.Lock()
     running = True
+
+    # 时频图（增量 STFT）状态：spec_inbuf 累积待处理的 ch0 样本，凑满一帧就滑窗算一帧，
+    # spec_frames 缓存最近若干帧，避免每次全量重算整个历史
+    spec_inbuf = collections.deque()                       # 待处理 ch0 样本流
+    n_spec_frames = max(1, int(fs * spec_sec / HOP))       # 时频图保留帧数
+    spec_frames = collections.deque(maxlen=n_spec_frames)  # 已算频谱帧，每帧 (freq,)
+    spec_win = np.hanning(FFT_N).astype(np.float32)
+    spec_total_frames = 0  # 累计计算的频谱帧数，用于时间轴随运行时间递增
 
     curves = {}
     colors = ["#ffd34d", "#4dff9e", "#4dc3ff", "#ff4d9e"]
@@ -251,9 +259,10 @@ def run_gui(port, baud, fs, window_sec, spec_sec=5.0):
                         buf = ch_bufs.setdefault(c, collections.deque(maxlen=window))
                         buf.extend(seg.tolist())
                         if c == 0:
-                            hist_buf.extend(seg.tolist())
+                            spec_inbuf.extend(seg.tolist())
 
     def update():
+        nonlocal spec_total_frames
         with lock:
             arr0 = None
             for ch, buf in ch_bufs.items():
@@ -274,29 +283,33 @@ def run_gui(port, baud, fs, window_sec, spec_sec=5.0):
                 freqs = np.fft.rfftfreq(x.size, 1.0 / fs)
                 spec_curve.setData(freqs, 20.0 * np.log10(sp / ref + 1e-12))
 
-            # 时频图（STFT）：对 ch0 历史做滑窗 FFT
-            hist = list(hist_buf)
-            if len(hist) >= FFT_N:
-                h = np.asarray(hist, dtype=np.float32)
-                h = h - np.float32(np.mean(h))
-                nframes = (h.size - FFT_N) // HOP + 1
-                idx = np.arange(nframes)[:, None] * HOP + np.arange(FFT_N)[None, :]
-                frames = h[idx]
-                w2 = np.hanning(FFT_N)
-                s = np.abs(np.fft.rfft(frames * w2, axis=1)).T  # (freq, time)
-                s_db = 20.0 * np.log10(s / (FFT_N / 4.0) + 1e-12)
-                # s_db 形状为 (freq, time)；转置成 (time, freq) 后交给 ImageItem，
-                # 使其按 col-major 默认把时间映射到 X 轴（左右滚动）、频率映射到 Y 轴
+            # 时频图（增量 STFT）：只对新增样本滑窗算新帧，旧帧复用缓存
+            while len(spec_inbuf) >= FFT_N:
+                frame = np.array(list(itertools.islice(spec_inbuf, 0, FFT_N)), dtype=np.float32)
+                frame -= np.float32(np.mean(frame))
+                sp = np.abs(np.fft.rfft(frame * spec_win))
+                spec_frames.append(sp)
+                spec_total_frames += 1
+                for _ in range(HOP):
+                    spec_inbuf.popleft()
+
+            if spec_frames:
+                s = np.asarray(spec_frames, dtype=np.float32)      # (nframes, freq)
+                s_db = 20.0 * np.log10(s / (FFT_N / 4.0) + 1e-12)  # (nframes, freq)
+                # 转成 (freq, time)：col-major 下第 0 维=X（频率）、第 1 维=Y（时间）
                 spec_img.setImage(np.ascontiguousarray(s_db.T), autoLevels=False, levels=(-90.0, 0.0))
-                # 时间轴：以“现在”为 0，负值表示过去；帧中心相对时间
-                x0 = ((FFT_N - 1) / 2.0 - (h.size - 1)) / fs
-                width = (nframes - 1) * HOP / fs if nframes > 1 else FFT_N / fs
-                spec_img.setRect(x0, 0.0, width, fs / 2.0)
+                nframes = s_db.shape[0]
+                # 频率轴 X：0~fs/2；时间轴 Y：从 0 起随运行递增，最新帧在顶部
+                t_newest = ((spec_total_frames - 1) * HOP + FFT_N) / fs
+                t_span = (nframes - 1) * HOP / fs if nframes > 1 else FFT_N / fs
+                t_oldest = t_newest - t_span
+                spec_img.setRect(0.0, t_oldest, fs / 2.0, t_span)
+                specgram_plot.setYRange(t_oldest, t_newest, padding=0)
 
         info.setText(
             f"frames={parser.frames}  dropped={parser.dropped}  "
             f"buffered={sum(len(b) for b in ch_bufs.values())}  wave={window/fs:.2f}s  "
-            f"specgram={len(hist_buf)/fs:.2f}s"
+            f"specgram={len(spec_frames) * HOP / fs:.2f}s"
         )
 
     thr = threading.Thread(target=reader_loop, daemon=True)
