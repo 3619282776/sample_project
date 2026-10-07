@@ -12,8 +12,11 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <stdbool.h>
+
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "driver/gpio.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/stream_buffer.h"
 #include "freertos/task.h"
@@ -325,8 +328,238 @@ static void render_spec(void)
     draw_text_right(s_spec_fb, DISP_W, SPEC_H, AXIS_X - 9, base - 3, "-90", C_TEXT);
 }
 
+/* ---------------- 屏幕切换按键 + 收音方向画面 ---------------- */
+
+#define BTN_GPIO          21      // 短按切换屏幕；低电平有效（内部上拉，接 GND），无需外部电阻
+#define BTN_DEBOUNCE_MS   30
+#define DOA_SMOOTH_TAU_MS 80      // 方向小圈的低通平滑时间常数
+
+enum { SCREEN_SCOPE = 0, SCREEN_DOA = 1 };
+
+static volatile float s_doa_angle = 0.0f;   // 目标方位角（度），doa_task 写入
+static int s_screen = SCREEN_SCOPE;          // 当前显示画面
+static float s_doa_smooth = 0.0f;            // 平滑后的角度（小圈所在位置）
+static TickType_t s_last_doa_tick = 0;       // 上次平滑的滴答计数
+
+/* 5x7 点阵字符按比例放大绘制到帧缓冲（支持 0-9 与 '-'） */
+static void fb_draw_char(uint16_t *fb, int fb_w, int fb_h, int x0, int y0, int scale,
+                         char ch, uint16_t color)
+{
+    int idx;
+    if (ch >= '0' && ch <= '9') {
+        idx = ch - '0';
+    } else if (ch == '-') {
+        idx = 10;
+    } else {
+        return;
+    }
+    const uint8_t *p = s_font[idx];
+    for (int r = 0; r < 7; r++) {
+        uint8_t bits = p[r];
+        for (int c = 0; c < 5; c++) {
+            if (bits & (0x10 >> c)) {
+                for (int dy = 0; dy < scale; dy++) {
+                    for (int dx = 0; dx < scale; dx++) {
+                        int px = x0 + c * scale + dx;
+                        int py = y0 + r * scale + dy;
+                        if (px >= 0 && px < fb_w && py >= 0 && py < fb_h) {
+                            fb[py * fb_w + px] = color;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/* 字符串显示宽度（与 fb_draw_text 的 6*scale 步进一致） */
+static int fb_text_width(const char *s, int scale)
+{
+    int len = (int)strlen(s);
+    return len > 0 ? (6 * len - 1) * scale : 0;
+}
+
+/* 按比例绘制字符串到帧缓冲 */
+static void fb_draw_text(uint16_t *fb, int fb_w, int fb_h, int x0, int y0, int scale,
+                         const char *s, uint16_t color)
+{
+    int x = x0;
+    while (*s) {
+        fb_draw_char(fb, fb_w, fb_h, x, y0, scale, *s, color);
+        x += 6 * scale;   // 字宽 5*scale + 间距 scale
+        s++;
+    }
+}
+
+/* 全局像素写入（自动定位到上/下半屏缓冲，供跨屏图形使用） */
+static void fb_put_px(int x, int y, uint16_t color)
+{
+    if (x < 0 || x >= DISP_W || y < 0 || y >= DISP_H) {
+        return;
+    }
+    if (y < DISP_H / 2) {
+        s_wave_fb[y * DISP_W + x] = color;
+    } else {
+        s_spec_fb[(y - DISP_H / 2) * DISP_W + x] = color;
+    }
+}
+
+/* 填充实心圆 */
+static void fb_disc(int cx, int cy, int r, uint16_t color)
+{
+    int r2 = r * r;
+    for (int dy = -r; dy <= r; dy++) {
+        for (int dx = -r; dx <= r; dx++) {
+            if (dx * dx + dy * dy <= r2) {
+                fb_put_px(cx + dx, cy + dy, color);
+            }
+        }
+    }
+}
+
+/* 上半圆弧：角参数 t 从 0°（右端）到 180°（左端），th 为粗细 */
+static void fb_arc(int cx, int cy, int r, int th, uint16_t color)
+{
+    for (int t = 0; t <= 180; t++) {
+        float rad = t * (float)M_PI / 180.0f;
+        float c = cosf(rad);
+        float s = sinf(rad);
+        for (int k = -th / 2; k <= th / 2; k++) {
+            int px = cx + (int)lroundf((r + k) * c);
+            int py = cy - (int)lroundf((r + k) * s);
+            fb_put_px(px, py, color);
+        }
+    }
+}
+
+/* 刻度：方位角 theta_deg（0=正上、+90=右、-90=左），沿径向向外伸 len */
+static void fb_tick(int cx, int cy, int r, int theta_deg, int len, int th, uint16_t color)
+{
+    float rad = theta_deg * (float)M_PI / 180.0f;
+    float c = sinf(rad);   // 径向向外的 x 分量
+    float s = cosf(rad);   // 径向向外的 y 分量
+    for (int k = 0; k < len; k++) {
+        int px = cx + (int)lroundf((r + k) * c);
+        int py = cy - (int)lroundf((r + k) * s);
+        for (int e = -th / 2; e <= th / 2; e++) {
+            fb_put_px(px + e, py, color);
+        }
+    }
+}
+
+/* 消抖后的按键下降沿检测：稳定按下返回 true 一次，松开后才可能再次触发 */
+static bool button_pressed_event(void)
+{
+    static int stable = 1;             // 已确认的稳定电平（1=松开）
+    static int prev_raw = 1;           // 上一次采样原始电平
+    static TickType_t t_change = 0;    // 电平开始变化的时间
+
+    int raw = gpio_get_level(BTN_GPIO);
+    TickType_t now = xTaskGetTickCount();
+
+    if (raw != prev_raw) {
+        prev_raw = raw;
+        t_change = now;
+        return false;
+    }
+    if (raw != stable && (now - t_change) >= pdMS_TO_TICKS(BTN_DEBOUNCE_MS)) {
+        stable = raw;
+        if (stable == 0) {             // 稳定过渡到低电平 = 一次有效按下
+            return true;
+        }
+    }
+    return false;
+}
+
+/* 收音方向画面：半圆表盘 + 沿弧滑动的小圈。
+ * 先在帧缓冲里按全局坐标画好，再两块半屏各一次 draw_bitmap 刷出（不逐行写屏）。 */
+static void render_doa(void)
+{
+    float ang = s_doa_smooth;
+    if (ang > 90.0f)  ang = 90.0f;
+    if (ang < -90.0f) ang = -90.0f;
+
+    int w = DISP_W, half = DISP_H / 2;
+    memset(s_wave_fb, 0, (size_t)w * half * sizeof(uint16_t));
+    memset(s_spec_fb, 0, (size_t)w * half * sizeof(uint16_t));
+
+    /* 表盘几何：圆心偏低，弧顶端留给数字 */
+    int cx = 160, cy = 205, r = 105;
+
+    /* 半圆弧 + 刻度（-90..+90 每 30°，0° 加长加亮） */
+    fb_arc(cx, cy, r, 3, 0x3186);
+    for (int th = -90; th <= 90; th += 30) {
+        int len = (th == 0) ? 16 : 9;
+        uint16_t col = (th == 0) ? 0xFFFF : 0x3186;
+        fb_tick(cx, cy, r, th, len, 2, col);
+    }
+
+    /* 刻度标注：顶部 0（上半屏），左右端点 -90 / 90（下半屏） */
+    fb_draw_text(s_wave_fb, w, half, cx - 2, cy - r - 14, 1, "0", 0xFFFF);
+    fb_draw_text(s_spec_fb, w, half, cx - r - 14, (cy - half) + 6, 1, "-90", 0xFFFF);
+    fb_draw_text(s_spec_fb, w, half, cx + r + 4,  (cy - half) + 6, 1, "90",  0xFFFF);
+
+    /* 顶部大号当前角度数字（绿色居中） */
+    {
+        char buf[8];
+        snprintf(buf, sizeof(buf), "%d", (int)lroundf(ang));
+        int scale = 5;
+        int tw = fb_text_width(buf, scale);
+        int x = (w - tw) / 2;
+        if (x < 0) x = 0;
+        fb_draw_text(s_wave_fb, w, half, x, 26, scale, buf, 0x07E0);
+    }
+
+    /* 小圈：当前方向，沿弧平滑移动（绿圈 + 白芯） */
+    {
+        float rad = ang * (float)M_PI / 180.0f;
+        int px = cx + (int)lroundf(r * sinf(rad));
+        int py = cy - (int)lroundf(r * cosf(rad));
+        fb_disc(px, py, 7, 0x07E0);
+        fb_disc(px, py, 2, 0xFFFF);
+    }
+
+    /* 上下两块缓冲互不覆盖，各刷一次 */
+    ili9341_draw_bitmap(0, WAVE_Y, w, half, s_wave_fb);
+    ili9341_draw_bitmap(0, SPEC_Y, w, half, s_spec_fb);
+}
+
+/* 方向画面每帧更新：低通平滑角度让小球平滑滑动，然后重绘 */
+static void doa_update_and_render(void)
+{
+    float target = s_doa_angle;
+    TickType_t now = xTaskGetTickCount();
+    int32_t dt = (int32_t)(now - s_last_doa_tick);
+    s_last_doa_tick = now;
+    if (dt < 0 || dt > 100) {
+        dt = 1;   // 回绕或长时间停顿的防护
+    }
+    float dt_s = dt / (float)configTICK_RATE_HZ;
+    float alpha = 1.0f - expf(-dt_s / (DOA_SMOOTH_TAU_MS / 1000.0f));
+    if (alpha > 1.0f) alpha = 1.0f;
+    s_doa_smooth += (target - s_doa_smooth) * alpha;
+
+    render_doa();
+}
+
+void scope_display_set_angle(float angle_deg)
+{
+    s_doa_angle = angle_deg;
+}
+
 esp_err_t scope_display_init(void)
 {
+    /* 屏幕切换按键：GPIO21 输入 + 内部上拉（低电平有效，接 GND，无需外部电阻） */
+    {
+        gpio_config_t btn = {
+            .pin_bit_mask = 1ULL << BTN_GPIO,
+            .mode = GPIO_MODE_INPUT,
+            .pull_up_en = GPIO_PULLUP_ENABLE,
+            .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        };
+        ESP_ERROR_CHECK(gpio_config(&btn));
+    }
+
     s_sb = xStreamBufferCreate(AUDIO_BLOCK_FRAMES * sizeof(int16_t) * 8,
                                AUDIO_BLOCK_FRAMES * sizeof(int16_t));
     if (s_sb == NULL) {
@@ -370,11 +603,33 @@ void scope_display_task(void *arg)
     int16_t block[AUDIO_BLOCK_FRAMES];
 
     while (1) {
-        size_t got = xStreamBufferReceive(s_sb, block, sizeof(block), portMAX_DELAY);
+        /* 有限超时：即使没有音频数据，也周期醒来响应按键 */
+        size_t got = xStreamBufferReceive(s_sb, block, sizeof(block), pdMS_TO_TICKS(50));
+
+        /* 短按 GPIO21：示波器 <-> 收音方向（每隔数据到达或 50ms 超时都会执行） */
+        if (button_pressed_event()) {
+            s_screen = (s_screen == SCREEN_SCOPE) ? SCREEN_DOA : SCREEN_SCOPE;
+            if (s_screen == SCREEN_DOA) {
+                s_doa_smooth = s_doa_angle;   // 进入方向画面立即定位到当前方向
+                s_last_doa_tick = xTaskGetTickCount();
+            }
+        }
+
         if (got == 0) {
+            /* 暂时无音频数据：方向画面仍逐帧刷新动画 */
+            if (s_screen == SCREEN_DOA) {
+                doa_update_and_render();
+            }
             continue;
         }
+
         int n = (int)(got / sizeof(int16_t));
+
+        if (s_screen == SCREEN_DOA) {
+            /* 方向画面：丢弃本块音频，每帧平滑并重绘小圈 */
+            doa_update_and_render();
+            continue;
+        }
 
         for (int i = 0; i < n; i++) {
             s_hist[s_hist_head] = block[i];

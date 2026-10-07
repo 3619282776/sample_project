@@ -91,6 +91,7 @@ static void doa_task(void *arg)
                 float ang = doa_estimate_angle(s_doa_l[b], s_doa_r[b], DOA_WINDOW);
                 if (!isnan(ang)) {          // 有效方向才更新，静音时保持上次角度
                     s_angle_deg = ang;
+                    scope_display_set_angle((float)s_angle_deg);   // 供方向画面显示
                 }
             }
         }
