@@ -208,9 +208,9 @@ def run_gui(port, baud, fs, window_sec, spec_sec=5.0):
     spec_plot.showGrid(x=True, y=True, alpha=0.3)
 
     specgram_plot = win.addPlot(title="Spectrogram / STFT — 人声频段 voice band (ch0)", row=2, col=0)
-    specgram_plot.setLabel("bottom", "frequency", units="Hz")
-    specgram_plot.setLabel("left", "time", units="s")
-    specgram_plot.setXRange(VOICE_FMIN, VOICE_FMAX)
+    specgram_plot.setLabel("bottom", "time", units="s")
+    specgram_plot.setLabel("left", "frequency", units="Hz")
+    specgram_plot.setYRange(VOICE_FMIN, VOICE_FMAX)
 
     info = win.addLabel("waiting for data...", row=3, col=0)
 
@@ -296,15 +296,15 @@ def run_gui(port, baud, fs, window_sec, spec_sec=5.0):
             if spec_frames:
                 s = np.asarray(spec_frames, dtype=np.float32)      # (nframes, freq)
                 s_db = 20.0 * np.log10(s / (FFT_N / 4.0) + 1e-12)  # (nframes, freq)
-                # 转成 (freq, time)：col-major 下第 0 维=X（频率）、第 1 维=Y（时间）
-                spec_img.setImage(np.ascontiguousarray(s_db.T), autoLevels=False, levels=(-90.0, 0.0))
+                # col-major 下第 0 维=X（时间）、第 1 维=Y（频率）
+                spec_img.setImage(np.ascontiguousarray(s_db), autoLevels=False, levels=(-90.0, 0.0))
                 nframes = s_db.shape[0]
-                # 频率轴 X：0~fs/2；时间轴 Y：从 0 起随运行递增，最新帧在顶部
+                # 时间轴 X：从 0 起随运行递增，最新帧在右；频率轴 Y：0~fs/2（低→高）
                 t_newest = ((spec_total_frames - 1) * HOP + FFT_N) / fs
                 t_span = (nframes - 1) * HOP / fs if nframes > 1 else FFT_N / fs
                 t_oldest = t_newest - t_span
-                spec_img.setRect(0.0, t_oldest, fs / 2.0, t_span)
-                specgram_plot.setYRange(t_oldest, t_newest, padding=0)
+                spec_img.setRect(t_oldest, 0.0, t_span, fs / 2.0)
+                specgram_plot.setXRange(t_oldest, t_newest, padding=0)
 
         info.setText(
             f"frames={parser.frames}  dropped={parser.dropped}  "

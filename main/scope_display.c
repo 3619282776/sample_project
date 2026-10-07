@@ -656,8 +656,24 @@ void scope_display_task(void *arg)
 
         int n = (int)(got / sizeof(int16_t));
 
+        /* 峰值频率：示波与收音方向两种画面都持续计算，供 OLED 屏 1 显示 */
+        update_spectrum(block, n);
+
+        /* 峰值频率 -> OLED 屏 1（节流：变化 >5Hz 或每 250ms 刷一次，避免频繁占用 I2C） */
+        {
+            static float s_last_peak = -1.0f;
+            static TickType_t s_last_oled = 0;
+            TickType_t now = xTaskGetTickCount();
+            float hp = s_peak_hz;
+            if (fabsf(hp - s_last_peak) > 5.0f || ((int32_t)(now - s_last_oled) >= (int32_t)pdMS_TO_TICKS(250))) {
+                s_last_peak = hp;
+                s_last_oled = now;
+                oled_show_fft(OLED_1, hp);
+            }
+        }
+
         if (s_screen == SCREEN_DOA) {
-            /* 方向画面：丢弃本块音频，每帧平滑并重绘小圈 */
+            /* 方向画面：不画波形/频谱，仅平滑并重绘方向小圈 */
             doa_update_and_render();
             continue;
         }
@@ -684,21 +700,6 @@ void scope_display_task(void *arg)
             }
             if (s_gain > TARGET_PX / MIN_PEAK) s_gain = TARGET_PX / MIN_PEAK;
             if (s_gain < 0.0001f) s_gain = 0.0001f;
-        }
-
-        update_spectrum(block, n);
-
-        /* 峰值频率 -> OLED 屏 1（节流：变化 >5Hz 或每 250ms 刷一次，避免频繁占用 I2C） */
-        {
-            static float s_last_peak = -1.0f;
-            static TickType_t s_last_oled = 0;
-            TickType_t now = xTaskGetTickCount();
-            float hp = s_peak_hz;
-            if (fabsf(hp - s_last_peak) > 5.0f || ((int32_t)(now - s_last_oled) >= (int32_t)pdMS_TO_TICKS(250))) {
-                s_last_peak = hp;
-                s_last_oled = now;
-                oled_show_fft(OLED_1, hp);
-            }
         }
 
         /* 渲染节流：降低 TFT 刷新率（波形数据仍持续累积进 s_hist，只减刷新次数） */
