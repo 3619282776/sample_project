@@ -23,11 +23,11 @@ void oled_clear(int idx);
 // 便捷封装：在 (x, y) 用 8x16 字体写一行文字并立即刷新
 void oled_print(int idx, uint8_t x, uint8_t y, const char *s);
 
-// 在指定屏居中显示「日期 + 时间」两行（8x16 字体），先清屏再一次性刷新，
-// 用于电脑端时间同步（屏幕 0 显示实时时钟）。
+// 在指定屏显示时钟：顶部「星期 + 日期」小字居中，分隔线下方 HH:MM:SS
+// 用 16x16 大数字居中，先清屏再一次性刷新。用于电脑端时间同步（屏 0）。
 void oled_show_time(int idx, int year, int month, int day, int hour, int minute, int second);
 
-// 在指定屏显示「FFT 峰值频率」：顶部小字标题「fft visualize project」+
-// 居中的大字频率值（XXXX Hz），先清屏再一次性刷新。屏 1 显示 scope_display
+// 在指定屏显示「FFT 峰值频率」：顶部小字标题「PEAK FREQ」，分隔线下方
+// 16x16 大数字频率值 + "Hz" 单位，先清屏再一次性刷新。屏 1 显示 scope_display
 // 计算的人声频段（60~4000 Hz）峰值频率。
 void oled_show_fft(int idx, float peak_hz);

@@ -16,5 +16,10 @@
 // 安静时小球仍乱动 → 调大；轻声不响应 → 调小。满幅约 8388608（24bit 右移 8 位后）。
 #define DOA_MIN_AMPLITUDE    200000.0f
 
+// 频谱峰值显示静音门限：mono 块平均幅值低于该值视为无有效声源，OLED 屏 1 保持
+// 上次峰值频率（与 DOA 行为一致）。对应 int16（满幅 32768），约为 DOA_MIN_AMPLITUDE/256。
+// 静音时峰值仍乱跳 → 调大；轻声不响应 → 调小。
+#define SPEC_MIN_AMPLITUDE   780.0f
+
 // 回放环形缓冲（FreeRTOS StreamBuffer）大小，单位字节
 #define PLAYBACK_BUF_BYTES   4096    // 约 128ms

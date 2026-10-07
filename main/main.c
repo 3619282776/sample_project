@@ -1,4 +1,5 @@
 #include <math.h>
+#include <string.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -79,7 +80,12 @@ static void playback_task(void *arg)
     while (1) {
         size_t got = xStreamBufferReceive(s_playback_sb, mono, block, portMAX_DELAY);
         if (got > 0) {
-            amp_write(mono, (int)(got / sizeof(int16_t)), portMAX_DELAY);
+            int samples = (int)(got / sizeof(int16_t));
+            // 示波模式写静音（全 0）而非停止 I2S，避免功放输入悬空产生杂音
+            if (!scope_display_is_doa()) {
+                memset(mono, 0, got);
+            }
+            amp_write(mono, samples, portMAX_DELAY);
         }
     }
 }

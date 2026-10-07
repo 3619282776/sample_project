@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdint.h>
+#include <stdbool.h>
 #include "esp_err.h"
 
 // TFT 屏幕显示：默认「波形 + FFT 频谱」示波器（复刻 tools/pc_waveform.py 的前两图），
@@ -25,3 +26,6 @@ int scope_display_feed(const int16_t *mono, int frames);
 // doa_task 调用：上报当前声源方位角（度，-90..+90，0=正前方，正=右侧，负=左侧）。
 // 「收音方向」画面据此实时更新。
 void scope_display_set_angle(float angle_deg);
+
+// 当前是否处于「收音方向」画面。功放回放据此决定是否出声（仅方向模式出声）。
+bool scope_display_is_doa(void);

@@ -36,6 +36,7 @@ static const char *TAG = "scope";
 #define SPEC_H       (DISP_H / 2)      // 120
 
 #define AXIS_X       44                // 左侧刻度区宽度，曲线/柱从第 44 列开始
+#define SCOPE_FRAME_MS 40              // TFT 示波器渲染节流：约 25fps（原约 60fps）
 
 /* ---------------- RGB565 颜色 ---------------- */
 #define C_BG      0x0000   // 黑
@@ -168,8 +169,11 @@ static void fft_radix2(float *re, float *im, int n)
 static void update_spectrum(const int16_t *x, int n)
 {
     float mean = 0.0f;
+    float amp_sum = 0.0f;
     for (int i = 0; i < n; i++) {
-        mean += (float)x[i];
+        float v = (float)x[i];
+        mean += v;
+        amp_sum += fabsf(v);
     }
     mean /= (float)n;
 
@@ -187,18 +191,24 @@ static void update_spectrum(const int16_t *x, int n)
         s_db[b] = 20.0f * log10f(mag / ref + 1e-12f);
     }
 
-    // 峰值频率：人声频段 (VMIN~VMAX) 内幅度最大的 bin → 频率，供 OLED 屏 1 显示
-    int best = 1;
+    // 峰值频率：人声频段 (VMIN~VMAX) 内幅度最大的 bin。best 从 -1 起步，只在有效
+    // bin 内更新，避免依赖 bin1 恰好落在 VMIN 内。
+    int best = -1;
     for (int b = 1; b < FFT_N / 2; b++) {
         float f = (float)b * BIN_HZ;
         if (f < VMIN || f > VMAX) {
             continue;
         }
-        if (s_db[b] > s_db[best]) {
+        if (best < 0 || s_db[b] > s_db[best]) {
             best = b;
         }
     }
-    s_peak_hz = (float)best * BIN_HZ;
+
+    // 静音门限：块平均幅值过低时不更新峰值频率，保持上次值（与 DOA 一致）。
+    // FFT/频谱照常刷新，TFT 仍正常显示噪声底，只有 OLED 屏 1 的峰值频率保持不变。
+    if (best >= 0 && amp_sum / (float)n >= SPEC_MIN_AMPLITUDE) {
+        s_peak_hz = (float)best * BIN_HZ;
+    }
 }
 
 /* 上半屏：波形折线 + 自适应增益 + 左侧幅度刻度 */
@@ -355,6 +365,12 @@ static volatile float s_doa_angle = 0.0f;   // 目标方位角（度），doa_ta
 static int s_screen = SCREEN_SCOPE;          // 当前显示画面
 static float s_doa_smooth = 0.0f;            // 平滑后的角度（小圈所在位置）
 static TickType_t s_last_doa_tick = 0;       // 上次平滑的滴答计数
+
+/* 当前是否处于「收音方向」画面（供功放回放判断：仅方向模式出声） */
+bool scope_display_is_doa(void)
+{
+    return s_screen == SCREEN_DOA;
+}
 
 /* 5x7 点阵字符按比例放大绘制到帧缓冲（支持 0-9 与 '-'） */
 static void fb_draw_char(uint16_t *fb, int fb_w, int fb_h, int x0, int y0, int scale,
@@ -685,11 +701,20 @@ void scope_display_task(void *arg)
             }
         }
 
-        /* 两图各用独立缓冲，异步 DMA 之间互不覆盖 */
-        render_wave();
-        ili9341_draw_bitmap(0, WAVE_Y, DISP_W, WAVE_H, s_wave_fb);
+        /* 渲染节流：降低 TFT 刷新率（波形数据仍持续累积进 s_hist，只减刷新次数） */
+        {
+            static TickType_t s_last_render = 0;
+            TickType_t now = xTaskGetTickCount();
+            if ((int32_t)(now - s_last_render) >= (int32_t)pdMS_TO_TICKS(SCOPE_FRAME_MS)) {
+                s_last_render = now;
 
-        render_spec();
-        ili9341_draw_bitmap(0, SPEC_Y, DISP_W, SPEC_H, s_spec_fb);
+                /* 两图各用独立缓冲，异步 DMA 之间互不覆盖 */
+                render_wave();
+                ili9341_draw_bitmap(0, WAVE_Y, DISP_W, WAVE_H, s_wave_fb);
+
+                render_spec();
+                ili9341_draw_bitmap(0, SPEC_Y, DISP_W, SPEC_H, s_spec_fb);
+            }
+        }
     }
 }

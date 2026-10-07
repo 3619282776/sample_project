@@ -12,10 +12,10 @@ dependencies:
   idf:
     source:
       type: idf
-    version: 5.3.4
+    version: 6.1.0
 direct_dependencies:
 - espressif/ssd1306
 - idf
 manifest_hash: a80bd5a8ea48c9d0e3fd32e96dbca0362252c924fe0b320ef223a184c1e58187
 target: esp32
-version: 2.0.0
+version: 3.0.0
