@@ -7,7 +7,7 @@
 #define ILI9341_PIN_MOSI  23
 #define ILI9341_PIN_CS    5
 #define ILI9341_PIN_DC    4
-#define ILI9341_PIN_RST   3
+#define ILI9341_PIN_RST   -1   // LCD RST 未接 MCU（已接 VCC），-1 = 走 esp_lcd 软件复位；GPIO3 让给 UART0 RX
 #define ILI9341_PIN_BL    2
 
 // 横屏逻辑分辨率（esp_lcd 交换 X/Y 后 = 320x240）

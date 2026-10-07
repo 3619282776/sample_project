@@ -18,13 +18,35 @@ pc_waveform.py — 实时显示 ESP32 INMP441 麦克风波形（USB 串口透传
 
 import argparse
 import collections
+import datetime
 import sys
 import threading
+import time
 
 import numpy as np
 
 MAGIC = b"\xaa\x55"
 FRAME_HDR = 5  # magic(2) + channels(1) + frames(2)
+
+# 下行（PC -> ESP32）时间帧头，与上行波形帧的 0xAA 0x55 相反，用于区分方向
+TIME_MAGIC = b"\x55\xaa"
+TIME_CMD = 0x01
+TIME_FRAME_LEN = 11
+
+
+def enc_time_frame(dt):
+    """把电脑时间编码成下行时间帧：帧头校验与 ESP 端 time_sync.c 保持一致（小端）。"""
+    body = bytearray(TIME_MAGIC)
+    body.append(TIME_CMD)
+    body.append(dt.year & 0xFF)
+    body.append((dt.year >> 8) & 0xFF)
+    body.append(dt.month & 0xFF)
+    body.append(dt.day & 0xFF)
+    body.append(dt.hour & 0xFF)
+    body.append(dt.minute & 0xFF)
+    body.append(dt.second & 0xFF)
+    body.append(sum(body[2:]) & 0xFF)
+    return bytes(body)
 
 
 class FrameParser:
@@ -279,6 +301,17 @@ def run_gui(port, baud, fs, window_sec, spec_sec=5.0):
 
     thr = threading.Thread(target=reader_loop, daemon=True)
     thr.start()
+
+    # 连接后立刻发一次电脑时间，之后每秒同步一次，显示到 ESP32 的 OLED 屏 0
+    def time_sender_loop():
+        while running:
+            try:
+                ser.write(enc_time_frame(datetime.datetime.now()))
+            except Exception:
+                pass
+            time.sleep(1.0)
+
+    threading.Thread(target=time_sender_loop, daemon=True).start()
 
     timer = QtCore.QTimer()
     timer.timeout.connect(update)

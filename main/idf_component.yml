@@ -3,3 +3,4 @@ dependencies:
   ## Required IDF version
   idf:
     version: '>=5.0'
+  espressif/ssd1306: ^1.0.5~1

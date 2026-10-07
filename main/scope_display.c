@@ -23,6 +23,7 @@
 
 #include "audio_config.h"
 #include "ili9341.h"
+#include "oled_display.h"
 
 static const char *TAG = "scope";
 
@@ -68,6 +69,7 @@ static float s_re[FFT_N];
 static float s_im[FFT_N];
 static float s_win[FFT_N];
 static float s_db[FFT_N / 2];          // bin 1..127 的 dBFS（bin0=DC 不用）
+static volatile float s_peak_hz = 0.0f; // 人声频段峰值频率（Hz），供 OLED 屏 1 显示
 
 static StreamBufferHandle_t s_sb = NULL;
 static uint16_t *s_wave_fb = NULL;     // 320x120（波形区）
@@ -184,6 +186,19 @@ static void update_spectrum(const int16_t *x, int n)
         float mag = sqrtf(s_re[b] * s_re[b] + s_im[b] * s_im[b]);
         s_db[b] = 20.0f * log10f(mag / ref + 1e-12f);
     }
+
+    // 峰值频率：人声频段 (VMIN~VMAX) 内幅度最大的 bin → 频率，供 OLED 屏 1 显示
+    int best = 1;
+    for (int b = 1; b < FFT_N / 2; b++) {
+        float f = (float)b * BIN_HZ;
+        if (f < VMIN || f > VMAX) {
+            continue;
+        }
+        if (s_db[b] > s_db[best]) {
+            best = b;
+        }
+    }
+    s_peak_hz = (float)best * BIN_HZ;
 }
 
 /* 上半屏：波形折线 + 自适应增益 + 左侧幅度刻度 */
@@ -656,6 +671,19 @@ void scope_display_task(void *arg)
         }
 
         update_spectrum(block, n);
+
+        /* 峰值频率 -> OLED 屏 1（节流：变化 >5Hz 或每 250ms 刷一次，避免频繁占用 I2C） */
+        {
+            static float s_last_peak = -1.0f;
+            static TickType_t s_last_oled = 0;
+            TickType_t now = xTaskGetTickCount();
+            float hp = s_peak_hz;
+            if (fabsf(hp - s_last_peak) > 5.0f || ((int32_t)(now - s_last_oled) >= (int32_t)pdMS_TO_TICKS(250))) {
+                s_last_peak = hp;
+                s_last_oled = now;
+                oled_show_fft(OLED_1, hp);
+            }
+        }
 
         /* 两图各用独立缓冲，异步 DMA 之间互不覆盖 */
         render_wave();

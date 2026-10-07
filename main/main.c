@@ -13,6 +13,8 @@
 #include "ili9341.h"
 #include "uart_stream.h"
 #include "scope_display.h"
+#include "oled_display.h"
+#include "time_sync.h"
 
 static const char *TAG = "main";
 
@@ -102,6 +104,16 @@ void app_main(void)
 {
     ESP_ERROR_CHECK(uart_stream_init());   // 先装 UART 驱动并重定向日志，启动日志也走 921600
     ESP_LOGI(TAG, "starting...");
+
+    // 两块 SSD1306 OLED（两条独立 I2C 总线），上电即显示各自编号与接线，便于核对 SDA/SCL
+    ESP_ERROR_CHECK(oled_display_init());
+    oled_print(OLED_0, 0, 0,  "OLED-0");
+    oled_print(OLED_0, 0, 24, "waiting time...");   // 收到电脑时间后由 time_sync 任务覆盖为实时时钟
+    oled_print(OLED_1, 0, 0,  "OLED-1");
+    oled_print(OLED_1, 0, 24, "SDA17 SCL19");
+
+    // 启动 UART0 RX 时间同步：电脑端（pc_waveform.py）每秒下发一次电脑时间，显示到屏 0
+    ESP_ERROR_CHECK(time_sync_start());
 
     ili9341_init();
     ili9341_fill_screen(0x0000);   // 初始清屏为黑，随后由示波器任务绘制波形/频谱

@@ -13,7 +13,7 @@
 #define UART_STREAM_TX_BUF 16384        // 发送环形缓冲，覆盖突发写入
 #define UART_STREAM_RX_BUF 256          // 驱动要求 rx_buf > UART_FIFO_LEN(127)，否则报 "rx buffer length error"
 #define UART_STREAM_TX_GPIO 1           // UART0 默认 TX，接板载 USB 转串口的 RXD
-#define UART_STREAM_RX_GPIO 33          // 占位 RX：GPIO3 已被 LCD RST 占用，映射到空闲 GPIO33，实际不接收
+#define UART_STREAM_RX_GPIO 3           // UART0 默认 RX（板载 USB 转串口 TXD）；LCD RST 已接 VCC，GPIO3 空闲，双向可用
 
 #define FRAME_MAGIC0      0xAA
 #define FRAME_MAGIC1      0x55
@@ -41,7 +41,7 @@ static int stream_log_vprintf(const char *fmt, va_list args)
 
 esp_err_t uart_stream_init(void)
 {
-    // 本项目只发不接收；RX 仍须分配非零缓冲（≥128）。占用 GPIO33 作占位，不接任何外设。
+    // 上行发波形、下行收时间帧，双向共用 UART0；RX 缓冲 ≥128 供接收使用。
     esp_err_t err = uart_driver_install(UART_STREAM_NUM, UART_STREAM_RX_BUF, UART_STREAM_TX_BUF, 0, NULL, 0);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "uart_driver_install failed: %s", esp_err_to_name(err));
@@ -62,7 +62,7 @@ esp_err_t uart_stream_init(void)
         return err;
     }
 
-    // TX=GPIO1（板载 USB 转串口 RXD）；RX=GPIO33 占位，避免占用 LCD RST 所在的 GPIO3
+    // TX=GPIO1（板载 USB 转串口 RXD）；RX=GPIO3（板载 USB 转串口 TXD），双向通信
     err = uart_set_pin(UART_STREAM_NUM, UART_STREAM_TX_GPIO,
                        UART_STREAM_RX_GPIO, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
     if (err != ESP_OK) {
@@ -71,7 +71,7 @@ esp_err_t uart_stream_init(void)
     }
 
     esp_log_set_vprintf(stream_log_vprintf);
-    ESP_LOGI(TAG, "stream UART ready on TX=GPIO%d, %d baud", UART_STREAM_TX_GPIO, UART_STREAM_BAUD);
+    ESP_LOGI(TAG, "stream UART ready on TX=GPIO%d RX=GPIO%d, %d baud", UART_STREAM_TX_GPIO, UART_STREAM_RX_GPIO, UART_STREAM_BAUD);
     return ESP_OK;
 }
 
