@@ -3,17 +3,15 @@
 基于 ESP-IDF 的 ESP32 音频可视化项目：双麦克风拾音 + 声源方位估计（DOA）、实时波形 / FFT 频谱示波、OLED 信息显示，以及串口波形透传到电脑。
 
 <!--
-  图片使用说明：
-  - 本 README 已为关键位置预留图片占位，直接替换下方的 `![...](路径)` 即可。
-  - 建议把图片统一放到项目内的 `docs/images/`（或 `assets/`）目录，再填写相对路径。
-  - 示例：`![硬件连接示意图](docs/images/hardware.png)`
+  图片说明：所有插图位于 `images/` 目录，使用相对路径引用。
+  新增图片建议长边 ≤1200px，避免仓库体积过大。
 -->
 
 ## 功能特性
 
 - **双麦克风拾音**：两片 INMP441 并联构成 I2S 立体声输入，16 kHz 采样。
 - **声源方位估计（DOA）**：基于左右声道互相关时延估计方位角（-90° ~ +90°）。
-- **实时回放**：MAX98357A I2S DAC 功放，麦克风信号直通输出。
+- **实时回放**：MAX98357A I2S DAC 功放；处于「收音方向」画面时麦克风信号直通输出，示波器画面主动静音（避免功放输入悬空产生杂音）。
 - **TFT 示波器**：2.8 寸 ST7789V（驱动沿用 ILI9341 命名）横屏显示，波形 + FFT 频谱，短按按键切换到「收音方向」画面。
 - **双 OLED 显示**：两块 SSD1306 走两条独立 I2C 总线，一块显示同步时钟、一块显示 FFT 峰值频率。
 - **串口波形透传**：UART0（921600）把音频样本打包成帧发给电脑，配合 `tools/pc_waveform.py` 实时绘图。
@@ -21,16 +19,15 @@
 
 ## 整体架构
 
-<!-- ⬇️ 图片占位：系统架构图 / 数据流图，替换为实际图片路径 -->
-![系统架构图](docs/images/architecture.png)
+![系统架构图（数据流）](images/System.png)
 
 ```
-INMP441 双麦克风 ──I2S──> 采集/DOA 任务
-                              │
-                              ├─> MAX98357A ──> 扬声器（直通回放）
-                              ├─> ST7789V TFT ──> 波形/FFT/方向画面
-                              ├─> SSD1306 OLED x2 ──> 时钟 / FFT 峰值
-                              └─> UART0 ──> pc_waveform.py（电脑端绘图）
+INMP441 双麦克风 ──I2S0──> audio_task（采集 / 混 mono / 分发）
+                                 │
+                                 ├─> doa_task ──────────> 互相关估计方位角
+                                 ├─> playback_task ─────> MAX98357A（仅方向画面出声）
+                                 ├─> scope_display_task ─> ST7789V + 双 SSD1306
+                                 └─> UART0 ─────────────> pc_waveform.py
 ```
 
 ## 硬件组成
@@ -44,8 +41,9 @@ INMP441 双麦克风 ──I2S──> 采集/DOA 任务
 | 屏幕 | SSD1306 128×64 | 2 | OLED 信息显示 |
 | 按键 | 轻触开关 | 1 | 切换示波器 / 方向画面 |
 
-<!-- ⬇️ 图片占位：硬件实物 / 连接示意图，替换为实际图片路径 -->
-![硬件连接示意图](docs/images/hardware.png)
+<img src="images/all.jpg" width="500">
+
+<img src="images/all1.jpg" width="500">
 
 ## 引脚接线
 
@@ -97,29 +95,35 @@ INMP441 双麦克风 ──I2S──> 采集/DOA 任务
 ```
 .
 ├── main/
-│   ├── main.c            # 主入口与任务编排
-│   ├── audio_config.h    # 音频 / DOA 全局参数
+│   ├── main.c            # 主入口、任务编排与缓冲
+│   ├── audio_config.h    # 音频 / DOA / 回放全局参数
 │   ├── inmp441_doa.c/.h  # INMP441 采集 + DOA 方位估计
 │   ├── max98357.c/.h     # MAX98357A 功放回放
 │   ├── ili9341.c/.h      # TFT (ST7789V) 驱动与绘图
 │   ├── scope_display.c/.h# TFT 示波器（波形 + FFT + 方向）
 │   ├── oled_display.c/.h # 双 SSD1306 OLED
+│   ├── share_tech_mono.h # 时钟显示用 16x16 点阵字模
 │   ├── uart_stream.c/.h  # UART 波形透传
 │   ├── time_sync.c/.h    # 时间同步
 │   ├── idf_component.yml # 组件依赖清单
 │   └── CMakeLists.txt
 ├── tools/
-│   └── pc_waveform.py    # 电脑端实时波形 / 频谱显示
+│   └── pc_waveform.py    # 电脑端实时波形 / 频谱 / 时频图
+├── images/               # README 插图
+├── flash.ps1             # 一键烧录（清理端口占用 + idf.py flash）
 ├── CMakeLists.txt
-├── sdkconfig
-└── dependencies.lock
+├── dependencies.lock     # 组件管理器锁定文件
+└── README.md
 ```
+
+> `sdkconfig` 由 `idf.py set-target` 在本地生成，已列入 `.gitignore`，不随仓库分发；`.vscode/`、`.devcontainer/`、`.claude/` 为编辑器 / 工具配置，与固件无关。
 
 ## 环境要求
 
-- **ESP-IDF**：5.x（在 `main/idf_component.yml` 中声明 `idf >= 5.0`）
+- **ESP-IDF**：`main/idf_component.yml` 声明 `idf >= 5.0`。实际验证版本为 **5.3.4**；`dependencies.lock` 记录的是生成该文件时的 **6.1.0**，其他版本未逐一验证。
 - **目标芯片**：`esp32`
-- **依赖组件**：`espressif/ssd1306 ^1.0.5~1`（由组件管理器自动拉取）
+- **依赖组件**：`espressif/ssd1306 1.0.5~1`（由组件管理器自动拉取）
+- **本机配置**：`flash.ps1` 的 IDF 路径与串口、`.vscode/settings.json` 的 `idf.espIdfPathWin` / `idf.port` 均为作者本机值，首次使用请改成自己的环境。
 
 ## 构建与烧录
 
@@ -131,10 +135,10 @@ idf.py set-target esp32
 idf.py build
 
 # 烧录并打开串口监视器
-idf.py -p COMx flash monitor
+idf.py -p COMx -b 921600 flash monitor
 ```
 
-> `COMx` 替换为实际串口号（默认 921600 波特率）。
+> `COMx` 替换为实际串口号。日志已重定向到 921600，**监视器必须显式指定波特率**，否则看到的是乱码；分开执行时用 `idf.py -p COMx monitor -b 921600`。
 
 ## 使用方法
 
@@ -153,19 +157,15 @@ python pc_waveform.py COM5            # 指定串口（921600 / 16 kHz）
 python pc_waveform.py --selftest      # 编解码自测（无需硬件/串口）
 ```
 
-<!-- ⬇️ 图片占位：电脑端 pc_waveform.py 界面截图，替换为实际图片路径 -->
-![电脑端波形显示界面](docs/images/pc_waveform.png)
+<img src="images/python.png" width="1000">
 
 ## 显示界面
 
-<!-- ⬇️ 图片占位：TFT 示波器（波形+FFT）截图，替换为实际图片路径 -->
-![TFT 示波器界面](docs/images/scope.png)
+<img src="images/de.jpg" width="400">
 
-<!-- ⬇️ 图片占位：TFT 方向画面截图，替换为实际图片路径 -->
-![TFT 收音方向界面](docs/images/direction.png)
+<img src="images/foward.jpg" width="400">
 
-<!-- ⬇️ 图片占位：OLED 显示效果截图，替换为实际图片路径 -->
-![OLED 显示效果](docs/images/oled.png)
+<img src="images/oled.jpg" width="400">
 
 ## 串口协议（简要）
 
